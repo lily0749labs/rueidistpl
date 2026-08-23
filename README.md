@@ -2,7 +2,6 @@
 
 基于 rueidis的 封装，方便结构使用
 
-[![CI](https://github.com/lilyredis/rueidistpl/actions/workflows/ci.yml/badge.svg)](https://github.com/lilyredis/rueidistpl/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/lilyredis/rueidistpl.svg)](https://pkg.go.dev/github.com/lilyredis/rueidistpl)
 
 `rueidistpl` 是 Rueidis 的业务友好薄封装：调用方使用简洁的类型化 API，底层缓存、Redis 命令和分布式锁仍分别由 `gocache`、Rueidis、`rueidislock` 实现。

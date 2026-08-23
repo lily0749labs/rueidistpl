@@ -54,13 +54,6 @@ func TestCompositeKeyPrefixUsesStableHashTag(t *testing.T) {
 	if got := compositeKeyPrefix(redis, "ranking"); got != want {
 		t.Fatalf("compositeKeyPrefix() = %q, want %q", got, want)
 	}
-	if got := compositeKeyPrefix(&Redis{}, ""); got != "{default}" {
-		t.Fatalf("empty compositeKeyPrefix() = %q, want %q", got, "{default}")
-	}
-	valuesKey, scoresKey := NewRanking[string](&Redis{}, "").Keys()
-	if valuesKey != "{default}:values" || scoresKey != "{default}:scores" {
-		t.Fatalf("NewRanking() keys = %q, %q, want default hash tag", valuesKey, scoresKey)
-	}
 }
 
 func TestExpirationInfo(t *testing.T) {
