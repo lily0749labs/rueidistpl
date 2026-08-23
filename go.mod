@@ -6,6 +6,8 @@ require (
 	github.com/eko/gocache/lib/v4 v4.2.4
 	github.com/eko/gocache/store/rueidis/v4 v4.1.7
 	github.com/redis/rueidis v1.0.77
+	github.com/redis/rueidis/mock v1.0.77
+	go.uber.org/mock v0.6.0
 )
 
 require (
