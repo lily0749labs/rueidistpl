@@ -1,5 +1,7 @@
 # rueidistpl
 
+基于 rueidis的 封装，方便结构使用
+
 [![CI](https://github.com/lilyredis/rueidistpl/actions/workflows/ci.yml/badge.svg)](https://github.com/lilyredis/rueidistpl/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/lilyredis/rueidistpl.svg)](https://pkg.go.dev/github.com/lilyredis/rueidistpl)
 
@@ -21,33 +23,33 @@ import "github.com/lilyredis/rueidistpl"
 
 ## 能力概览
 
-| 场景 | 对外 API | 底层实现 |
-| --- | --- | --- |
-| TTL 对象缓存 | `NewCache[T]` | `gocache` Rueidis Store |
-| 单个 JSON 对象 | `NewValue[T]` | Redis String + JSON |
-| Hash 对象表 | `NewHash[T]` | Rueidis Hash + JSON |
-| 对象排行榜 | `NewRanking[T]` | Hash + ZSet + 原子 Lua |
-| 计数器 | `rueidistpl.Counter` | `GET/SET/INCRBY` |
-| 字符串 List、Set | `rueidistpl.StringList`、`rueidistpl.StringSet` | Rueidis Builder |
-| 对象 List | `NewList[T]` | Redis List + JSON |
-| 对象 Set | `NewSet[T]` | Redis Set + JSON |
-| 稀疏对象 Array | `NewArray[T]` | Redis 8.8+ 原生 Array + JSON |
-| 位图 | `rueidistpl.Bitmap` | Redis String 位操作 |
-| 地理位置 | `rueidistpl.Geo` | Redis Geo/ZSet |
-| 近似去重 | `rueidistpl.HyperLogLog` | Redis HyperLogLog |
-| JSON 文档 | `NewJSONDocument[T]` | RedisJSON + JSONPath |
-| 时间序列 | `rueidistpl.TimeSeries` | RedisTimeSeries |
-| 向量集合 | `rueidistpl.VectorSet` | Redis 8.0+ Vector Set |
-| Bloom/Cuckoo Filter | `rueidistpl.BloomFilter`、`rueidistpl.CuckooFilter` | RedisBloom |
-| 频率统计 | `rueidistpl.CountMinSketch`、`rueidistpl.TopK` | RedisBloom |
-| 分布统计 | `rueidistpl.TDigest` | RedisBloom t-digest |
-| 通用有序集合 | `rueidistpl.SortedSet` | Redis ZSet |
-| 消息流 | `NewStream[T]` | Redis Stream + JSON |
-| 发布订阅 | `NewPubSub[T]` | 普通、模式、Sharded Pub/Sub |
-| 幂等控制 | `rueidistpl.Idempotency` | `SET NX PX` |
-| 轻量延迟任务 | `NewDelayQueue[T]` | Hash + ZSet + 原子 Lua |
-| 分布式锁 | `rueidistpl.Redis.Lock`、`rueidistpl.Redis.TryLock` | `rueidislock` |
-| 特殊 Redis 命令 | `rueidistpl.Redis.Client()` | 原生 Rueidis Client |
+| 场景                | 对外 API                                            | 底层实现                     |
+| ------------------- | --------------------------------------------------- | ---------------------------- |
+| TTL 对象缓存        | `NewCache[T]`                                       | `gocache` Rueidis Store      |
+| 单个 JSON 对象      | `NewValue[T]`                                       | Redis String + JSON          |
+| Hash 对象表         | `NewHash[T]`                                        | Rueidis Hash + JSON          |
+| 对象排行榜          | `NewRanking[T]`                                     | Hash + ZSet + 原子 Lua       |
+| 计数器              | `rueidistpl.Counter`                                | `GET/SET/INCRBY`             |
+| 字符串 List、Set    | `rueidistpl.StringList`、`rueidistpl.StringSet`     | Rueidis Builder              |
+| 对象 List           | `NewList[T]`                                        | Redis List + JSON            |
+| 对象 Set            | `NewSet[T]`                                         | Redis Set + JSON             |
+| 稀疏对象 Array      | `NewArray[T]`                                       | Redis 8.8+ 原生 Array + JSON |
+| 位图                | `rueidistpl.Bitmap`                                 | Redis String 位操作          |
+| 地理位置            | `rueidistpl.Geo`                                    | Redis Geo/ZSet               |
+| 近似去重            | `rueidistpl.HyperLogLog`                            | Redis HyperLogLog            |
+| JSON 文档           | `NewJSONDocument[T]`                                | RedisJSON + JSONPath         |
+| 时间序列            | `rueidistpl.TimeSeries`                             | RedisTimeSeries              |
+| 向量集合            | `rueidistpl.VectorSet`                              | Redis 8.0+ Vector Set        |
+| Bloom/Cuckoo Filter | `rueidistpl.BloomFilter`、`rueidistpl.CuckooFilter` | RedisBloom                   |
+| 频率统计            | `rueidistpl.CountMinSketch`、`rueidistpl.TopK`      | RedisBloom                   |
+| 分布统计            | `rueidistpl.TDigest`                                | RedisBloom t-digest          |
+| 通用有序集合        | `rueidistpl.SortedSet`                              | Redis ZSet                   |
+| 消息流              | `NewStream[T]`                                      | Redis Stream + JSON          |
+| 发布订阅            | `NewPubSub[T]`                                      | 普通、模式、Sharded Pub/Sub  |
+| 幂等控制            | `rueidistpl.Idempotency`                            | `SET NX PX`                  |
+| 轻量延迟任务        | `NewDelayQueue[T]`                                  | Hash + ZSet + 原子 Lua       |
+| 分布式锁            | `rueidistpl.Redis.Lock`、`rueidistpl.Redis.TryLock` | `rueidislock`                |
+| 特殊 Redis 命令     | `rueidistpl.Redis.Client()`                         | 原生 Rueidis Client          |
 
 封装层只负责统一配置、JSON 转换、键命名和少量业务数据布局，不重新实现连接池、缓存一致性、锁续期或 Redis 命令协议。
 
@@ -382,28 +384,28 @@ result := redisClient.Client().Do(ctx, redisClient.Client().B().Xlen().Key(key).
 
 ### Redis 版本边界
 
-| 功能 | 最低 Redis 版本 |
-| --- | --- |
-| 基础 String/Hash/List/Set/ZSet、缓存、普通 Stream | 6.2（项目默认基线） |
-| `Value.GetDelete`、`Stream.AutoClaim` | 6.2 |
-| Sharded Pub/Sub、`AutoClaimResult.DeletedIDs`、XINFO `entries-read/lag` | 7.0 |
-| XINFO Consumer `inactive` | 7.2 |
-| Hash field `ExpireField`/`TTLField`/`PersistField` | 7.4 |
-| Bitmap、Geo、HyperLogLog | 6.2 基线内可用 |
-| JSONDocument、TimeSeries、Bloom/Cuckoo/CMS/TopK/TDigest | Redis 8 标准版；旧版需要对应模块 |
-| Vector Set 基础操作与相似搜索 | 8.0 |
-| `VectorSet.Contains` (`VISMEMBER`) | 8.2 |
-| 原生 Array：`NewArray[T]` 的全部方法 | 8.8 |
+| 功能                                                                    | 最低 Redis 版本                  |
+| ----------------------------------------------------------------------- | -------------------------------- |
+| 基础 String/Hash/List/Set/ZSet、缓存、普通 Stream                       | 6.2（项目默认基线）              |
+| `Value.GetDelete`、`Stream.AutoClaim`                                   | 6.2                              |
+| Sharded Pub/Sub、`AutoClaimResult.DeletedIDs`、XINFO `entries-read/lag` | 7.0                              |
+| XINFO Consumer `inactive`                                               | 7.2                              |
+| Hash field `ExpireField`/`TTLField`/`PersistField`                      | 7.4                              |
+| Bitmap、Geo、HyperLogLog                                                | 6.2 基线内可用                   |
+| JSONDocument、TimeSeries、Bloom/Cuckoo/CMS/TopK/TDigest                 | Redis 8 标准版；旧版需要对应模块 |
+| Vector Set 基础操作与相似搜索                                           | 8.0                              |
+| `VectorSet.Contains` (`VISMEMBER`)                                      | 8.2                              |
+| 原生 Array：`NewArray[T]` 的全部方法                                    | 8.8                              |
 
 项目保持 Redis 6.2 基础能力兼容，并将 Redis 8.10.0 作为当前已验证的最高版本。不使用高版本便利 API 时，其他封装不会主动发送这些新命令；这里的“最高版本”表示已验证上限，不会主动拒绝后续 Redis 版本。
 
 ### 部署拓扑
 
-| 拓扑 | 支持情况 | 说明 |
-| --- | --- | --- |
-| Standalone | 支持 | 可使用全部符合 Redis 版本要求的封装 |
-| Cluster | 支持核心路由 | 跨 Slot 批量操作会逐 key 路由；组合结构自动使用 hash tag |
-| Sentinel | 复用 Rueidis | 通过 `ClientOption.Sentinel` 配置连接和认证 |
+| 拓扑       | 支持情况     | 说明                                                     |
+| ---------- | ------------ | -------------------------------------------------------- |
+| Standalone | 支持         | 可使用全部符合 Redis 版本要求的封装                      |
+| Cluster    | 支持核心路由 | 跨 Slot 批量操作会逐 key 路由；组合结构自动使用 hash tag |
+| Sentinel   | 复用 Rueidis | 通过 `ClientOption.Sentinel` 配置连接和认证              |
 
 Cluster 中，`DeleteEach` 和 `ExistsEach` 会逐 key 路由，可以接收跨 Slot 输入。Ranking 和 DelayQueue 会自动让内部 key 共用 Slot。`Bitmap.Combine`、`HyperLogLog.CountWith`/`MergeFrom` 等 Redis 原生多 key 命令仍要求调用方在逻辑 key 中使用相同 `{hash-tag}`。
 
