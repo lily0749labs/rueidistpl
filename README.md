@@ -11,7 +11,7 @@
 要求 Go 1.25 或更高版本：
 
 ```bash
-go get github.com/lily0749labs/rueidistpl@v0.1.0
+go get github.com/lily0749labs/rueidistpl@v0.1.1
 ```
 
 代码中统一使用下面的导入路径：
