@@ -214,9 +214,9 @@ func atLeastMillisecond(duration time.Duration) time.Duration {
 
 func compositeKeyPrefix(redis *Redis, namespace string) string {
 	namespace = redis.Key(namespace)
-	if namespace == "" {
-		return "{default}"
-	}
 	tag := base64.RawURLEncoding.EncodeToString([]byte(namespace))
+	if tag == "" {
+		tag = "default"
+	}
 	return namespace + ":{" + tag + "}"
 }
