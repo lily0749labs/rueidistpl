@@ -63,7 +63,7 @@ func (array *Array[T]) Set(ctx context.Context, start int64, values ...T) (int64
 }
 
 // SetMany 按任意下标批量写入对象，返回原先为空、此次新建的槽位数。
-// 为使命令顺序保持稳定，下标会按升序发送；空 map 返回 0 且不访问 Redis。
+// 为使命令和测试可复现，下标会按升序发送；空 map 返回 0 且不访问 Redis。
 func (array *Array[T]) SetMany(ctx context.Context, values map[int64]T) (int64, error) {
 	if len(values) == 0 {
 		return 0, nil

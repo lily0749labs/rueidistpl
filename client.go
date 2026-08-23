@@ -22,7 +22,7 @@ const (
 // ErrClosed 表示 Redis 门面已经关闭，不能再创建或获取锁客户端。
 var ErrClosed = errors.New("rueidistpl: redis client is closed")
 
-// 工厂变量用于集中封装客户端创建入口；默认始终使用 Rueidis 官方构造函数。
+// 工厂变量只作为包内测试注入点；生产环境始终使用 Rueidis 官方构造函数。
 var rueidisClientFactory = rueidis.NewClient
 var rueidisLockerFactory = rueidislock.NewLocker
 
