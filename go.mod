@@ -1,4 +1,4 @@
-module github.com/lilyredis/rueidistpl
+module github.com/lily0749labs/rueidistpl
 
 go 1.25.0
 

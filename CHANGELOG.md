@@ -14,5 +14,5 @@
 - 支持 Redis 8 的 JSON、TimeSeries、Vector Set、概率结构，以及 Redis 8.8+ Array。
 - 提供跨 Cluster Slot 的逐 key 删除和存在性检查，以及组合结构的 hash tag 管理。
 
-[Unreleased]: https://github.com/lilyredis/rueidistpl/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/lilyredis/rueidistpl/releases/tag/v0.1.0
+[Unreleased]: https://github.com/lily0749labs/rueidistpl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/lily0749labs/rueidistpl/releases/tag/v0.1.0

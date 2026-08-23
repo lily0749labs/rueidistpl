@@ -2,7 +2,7 @@
 
 基于 rueidis的 封装，方便结构使用
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/lilyredis/rueidistpl.svg)](https://pkg.go.dev/github.com/lilyredis/rueidistpl)
+[![Go Reference](https://pkg.go.dev/badge/github.com/lily0749labs/rueidistpl.svg)](https://pkg.go.dev/github.com/lily0749labs/rueidistpl)
 
 `rueidistpl` 是 Rueidis 的业务友好薄封装：调用方使用简洁的类型化 API，底层缓存、Redis 命令和分布式锁仍分别由 `gocache`、Rueidis、`rueidislock` 实现。
 
@@ -11,13 +11,13 @@
 要求 Go 1.25 或更高版本：
 
 ```bash
-go get github.com/lilyredis/rueidistpl@v0.1.0
+go get github.com/lily0749labs/rueidistpl@v0.1.0
 ```
 
 代码中统一使用下面的导入路径：
 
 ```go
-import "github.com/lilyredis/rueidistpl"
+import "github.com/lily0749labs/rueidistpl"
 ```
 
 ## 能力概览
