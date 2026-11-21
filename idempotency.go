@@ -2,8 +2,6 @@ package rueidistpl
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -11,13 +9,23 @@ import (
 	"github.com/redis/rueidis"
 )
 
-const idempotencyCleanupTimeout = 5 * time.Second
+const idempotencyOperationTimeout = 5 * time.Second
+
+// ErrIdempotencyLeaseLost 表示 Run 执行期间幂等标记已过期、被替换或无法续租。
+// 收到该错误时不能假设业务未执行，调用方应依靠下游唯一约束或业务状态进行核对。
+var ErrIdempotencyLeaseLost = errors.New("rueidistpl: idempotency lease lost")
 
 var idempotencyForgetOwnedScript = rueidis.NewLuaScriptRetryable(`
 if redis.call("GET", KEYS[1]) ~= ARGV[1] then
   return 0
 end
 return redis.call("DEL", KEYS[1])`)
+
+var idempotencyRefreshOwnedScript = rueidis.NewLuaScriptRetryable(`
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+return redis.call("PEXPIRE", KEYS[1], ARGV[2])`)
 
 // Idempotency 使用 SET NX PX 记录已接收的业务 ID。
 type Idempotency struct {
@@ -48,13 +56,16 @@ func (idempotency *Idempotency) try(ctx context.Context, id string, ttl time.Dur
 	return err == nil, err
 }
 
-// Run 仅为首次出现的 ID 执行 fn；fn 失败时只删除本次执行持有的标记以允许重试。
-// 即使执行期间 TTL 到期且其他请求重新取得标记，旧请求也不会误删新标记。
+// Run 仅为首次出现的 ID 执行 fn，并在执行期间按 ttl/3 自动续租。
+// fn 必须使用收到的 context；续租失败时该 context 会以 ErrIdempotencyLeaseLost 为 cause 取消。
+// fn 成功后会把标记有效期重新设置为完整 ttl；fn 失败时只删除本次持有的标记以允许重试。
+// Redis 幂等标记不能替代数据库唯一约束，也不提供跨 Redis 与外部系统的恰好一次事务。
 func (idempotency *Idempotency) Run(ctx context.Context, id string, ttl time.Duration, fn func(context.Context) error) (bool, error) {
 	if ttl <= 0 {
 		return false, ErrInvalidExpiration
 	}
-	token, err := newIdempotencyToken()
+	ttl = atLeastMillisecond(ttl)
+	token, err := newOwnershipToken()
 	if err != nil {
 		return false, err
 	}
@@ -65,13 +76,102 @@ func (idempotency *Idempotency) Run(ctx context.Context, id string, ttl time.Dur
 	if fn == nil {
 		return true, nil
 	}
-	if err := fn(ctx); err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), idempotencyCleanupTimeout)
-		defer cancel()
-		forgetErr := idempotency.forgetOwned(cleanupCtx, id, token)
-		return true, errors.Join(err, forgetErr)
+
+	workCtx, cancelWork := context.WithCancelCause(ctx)
+	defer cancelWork(nil)
+	stopRenewal := make(chan struct{})
+	renewalDone := make(chan error, 1)
+	go idempotency.renewOwnedUntilStopped(workCtx, cancelWork, stopRenewal, renewalDone, id, token, ttl)
+
+	workErr := fn(workCtx)
+	close(stopRenewal)
+	renewalErr := <-renewalDone
+	cancelWork(nil)
+	if workErr != nil || renewalErr != nil {
+		forgetErr := idempotency.forgetOwnedWithTimeout(ctx, id, token, ttl)
+		return true, errors.Join(workErr, renewalErr, forgetErr)
+	}
+
+	finalizeCtx, cancelFinalize := context.WithTimeout(context.WithoutCancel(ctx), idempotencyCommandTimeout(ttl))
+	defer cancelFinalize()
+	refreshed, err := idempotency.refreshOwned(finalizeCtx, id, token, ttl)
+	if err != nil {
+		return true, errors.Join(ErrIdempotencyLeaseLost, fmt.Errorf("finalize idempotency marker: %w", err))
+	}
+	if !refreshed {
+		return true, ErrIdempotencyLeaseLost
 	}
 	return true, nil
+}
+
+func (idempotency *Idempotency) renewOwnedUntilStopped(
+	ctx context.Context,
+	cancelWork context.CancelCauseFunc,
+	stop <-chan struct{},
+	done chan<- error,
+	id, token string,
+	ttl time.Duration,
+) {
+	interval := ttl / 3
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-stop:
+			done <- nil
+			return
+		case <-ctx.Done():
+			done <- nil
+			return
+		case <-timer.C:
+			renewCtx, cancelRenew := context.WithTimeout(context.WithoutCancel(ctx), idempotencyCommandTimeout(ttl))
+			refreshed, err := idempotency.refreshOwned(renewCtx, id, token, ttl)
+			cancelRenew()
+			if err != nil {
+				leaseErr := errors.Join(ErrIdempotencyLeaseLost, fmt.Errorf("renew idempotency marker: %w", err))
+				cancelWork(leaseErr)
+				done <- leaseErr
+				return
+			}
+			if !refreshed {
+				cancelWork(ErrIdempotencyLeaseLost)
+				done <- ErrIdempotencyLeaseLost
+				return
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+func (idempotency *Idempotency) refreshOwned(ctx context.Context, id, token string, ttl time.Duration) (bool, error) {
+	refreshed, err := idempotencyRefreshOwnedScript.Exec(
+		ctx,
+		idempotency.client,
+		[]string{idempotency.key(id)},
+		[]string{token, fmt.Sprintf("%d", ttl.Milliseconds())},
+	).AsInt64()
+	return refreshed == 1, err
+}
+
+func (idempotency *Idempotency) forgetOwnedWithTimeout(ctx context.Context, id, token string, ttl time.Duration) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), idempotencyCommandTimeout(ttl))
+	defer cancel()
+	return idempotency.forgetOwned(cleanupCtx, id, token)
+}
+
+func idempotencyCommandTimeout(ttl time.Duration) time.Duration {
+	timeout := ttl / 3
+	if timeout < time.Millisecond {
+		timeout = time.Millisecond
+	}
+	if timeout > idempotencyOperationTimeout {
+		timeout = idempotencyOperationTimeout
+	}
+	return timeout
 }
 
 // Exists 判断业务 ID 的幂等标记是否仍然有效。
@@ -96,12 +196,4 @@ func (idempotency *Idempotency) forgetOwned(ctx context.Context, id, token strin
 
 func (idempotency *Idempotency) key(id string) string {
 	return joinKey(idempotency.prefix, id)
-}
-
-func newIdempotencyToken() (string, error) {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", fmt.Errorf("create idempotency ownership token: %w", err)
-	}
-	return hex.EncodeToString(value[:]), nil
 }

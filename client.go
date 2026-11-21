@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -18,10 +19,20 @@ import (
 const (
 	defaultCacheTTL           = 10 * time.Minute
 	defaultClientSideCacheTTL = 5 * time.Second
+	defaultLockerKeyValidity  = 5 * time.Second
+	defaultLockerKeyMajority  = 2
 )
 
-// ErrClosed 表示 Redis 门面已经关闭，不能再创建或获取锁客户端。
-var ErrClosed = errors.New("rueidistpl: redis client is closed")
+var (
+	// ErrClosed 表示 Redis 门面已经关闭，不能再创建或获取锁客户端。
+	ErrClosed = errors.New("rueidistpl: redis client is closed")
+	// ErrInvalidLockerConfig 表示锁续期间隔不足以在租约过期前安全续期。
+	ErrInvalidLockerConfig = errors.New("rueidistpl: invalid locker configuration")
+	// ErrLockLost 表示业务执行期间已失去分布式锁租约。
+	ErrLockLost = errors.New("rueidistpl: distributed lock lease lost")
+	// ErrNilLockHandler 表示 WithLock 或 WithFencedLock 没有收到业务函数。
+	ErrNilLockHandler = errors.New("rueidistpl: lock handler must not be nil")
+)
 
 // 工厂变量只作为包内测试注入点；生产环境始终使用 Rueidis 官方构造函数。
 var rueidisClientFactory = rueidis.NewClient
@@ -55,6 +66,11 @@ type Redis struct {
 
 // New 创建统一 Redis 门面。只有首次使用锁时才会建立 rueidislock 专用客户端。
 func New(config Config) (*Redis, error) {
+	lockerOption, err := normalizedLockerOption(config)
+	if err != nil {
+		return nil, err
+	}
+
 	client, err := rueidisClientFactory(config.ClientOption)
 	if err != nil {
 		return nil, err
@@ -76,21 +92,50 @@ func New(config Config) (*Redis, error) {
 		store.WithClientSideCaching(clientSideCacheTTL),
 	))
 
-	lockerOption := config.LockerOption
-	lockerOption.ClientOption = config.ClientOption
-	if lockerOption.KeyPrefix == "" {
-		lockerOption.KeyPrefix = joinKey(config.KeyPrefix, "locks")
-	}
-	if lockerOption.KeyMajority <= 0 {
-		lockerOption.KeyMajority = 1
-	}
-
 	return &Redis{
 		client:       client,
 		cache:        cacheManager,
 		keyPrefix:    config.KeyPrefix,
 		lockerOption: lockerOption,
 	}, nil
+}
+
+func normalizedLockerOption(config Config) (rueidislock.LockerOption, error) {
+	option := config.LockerOption
+	option.ClientOption = config.ClientOption
+	if option.KeyPrefix == "" {
+		option.KeyPrefix = joinKey(config.KeyPrefix, "locks")
+	}
+	if option.KeyMajority <= 0 {
+		option.KeyMajority = defaultLockerKeyMajority
+	}
+
+	validity := option.KeyValidity
+	if validity <= 0 {
+		validity = defaultLockerKeyValidity
+	}
+	if validity < 2*time.Millisecond {
+		return rueidislock.LockerOption{}, fmt.Errorf(
+			"%w: KeyValidity (%s) must be at least 2ms",
+			ErrInvalidLockerConfig,
+			validity,
+		)
+	}
+	extendInterval := option.ExtendInterval
+	if extendInterval <= 0 {
+		extendInterval = validity / 2
+	}
+	if extendInterval < time.Millisecond || extendInterval >= validity {
+		return rueidislock.LockerOption{}, fmt.Errorf(
+			"%w: ExtendInterval (%s) must be at least 1ms and shorter than KeyValidity (%s)",
+			ErrInvalidLockerConfig,
+			extendInterval,
+			validity,
+		)
+	}
+	option.KeyValidity = validity
+	option.ExtendInterval = extendInterval
+	return option, nil
 }
 
 // Client 返回原生 Rueidis 客户端，用于模板未覆盖的命令。
@@ -159,6 +204,86 @@ func (redis *Redis) TryLock(ctx context.Context, name string) (context.Context, 
 		return nil, nil, err
 	}
 	return locker.TryWithContext(ctx, name)
+}
+
+// LockFenced 等待获得锁，并生成一个单调递增的 fencing token。
+// 下游资源必须持久化并拒绝小于等于已见最大值的 token，才能阻止失去租约的旧持有者继续写入。
+func (redis *Redis) LockFenced(ctx context.Context, name string) (context.Context, int64, context.CancelFunc, error) {
+	return redis.lockFenced(ctx, name, false)
+}
+
+// TryLockFenced 只尝试一次获取锁，并在成功后生成 fencing token。
+func (redis *Redis) TryLockFenced(ctx context.Context, name string) (context.Context, int64, context.CancelFunc, error) {
+	return redis.lockFenced(ctx, name, true)
+}
+
+func (redis *Redis) lockFenced(ctx context.Context, name string, try bool) (context.Context, int64, context.CancelFunc, error) {
+	var (
+		lockCtx context.Context
+		unlock  context.CancelFunc
+		err     error
+	)
+	if try {
+		lockCtx, unlock, err = redis.TryLock(ctx, name)
+	} else {
+		lockCtx, unlock, err = redis.Lock(ctx, name)
+	}
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	token, err := redis.client.Do(
+		lockCtx,
+		redis.client.B().Incr().Key(redis.FencingKey(name)).Build(),
+	).AsInt64()
+	if err != nil {
+		unlock()
+		return nil, 0, nil, fmt.Errorf("create fencing token: %w", err)
+	}
+	return lockCtx, token, unlock, nil
+}
+
+// FencingKey 返回某个锁名对应的 fencing 计数器 key。
+// 该 key 不应删除或设置过期时间，否则 token 可能倒退。
+func (redis *Redis) FencingKey(name string) string {
+	encodedName := base64.RawURLEncoding.EncodeToString([]byte(name))
+	return redis.Key(joinKey("lock-fencing", encodedName))
+}
+
+// WithLock 持锁执行 fn，并在 fn 返回时释放锁。
+// fn 必须使用收到的 lockCtx；若续租失败，即使 fn 返回 nil，本方法也会返回 ErrLockLost。
+func (redis *Redis) WithLock(ctx context.Context, name string, fn func(context.Context) error) error {
+	if fn == nil {
+		return ErrNilLockHandler
+	}
+	lockCtx, unlock, err := redis.Lock(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return lockedWorkResult(ctx, lockCtx, fn(lockCtx))
+}
+
+// WithFencedLock 持有带 fencing token 的锁执行 fn，并在 fn 返回时释放锁。
+func (redis *Redis) WithFencedLock(ctx context.Context, name string, fn func(context.Context, int64) error) error {
+	if fn == nil {
+		return ErrNilLockHandler
+	}
+	lockCtx, token, unlock, err := redis.LockFenced(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return lockedWorkResult(ctx, lockCtx, fn(lockCtx, token))
+}
+
+func lockedWorkResult(parentCtx, lockCtx context.Context, workErr error) error {
+	if lockCtx.Err() == nil {
+		return workErr
+	}
+	if parentErr := parentCtx.Err(); parentErr != nil {
+		return errors.Join(workErr, parentErr)
+	}
+	return errors.Join(workErr, ErrLockLost)
 }
 
 // GetString 读取普通字符串，并自动应用全局 key 前缀。

@@ -42,8 +42,8 @@ func TestNewAppliesDefaultsAndCloseIsIdempotent(t *testing.T) {
 	if redis.lockerOption.KeyPrefix != "app:locks" {
 		t.Fatalf("New() locker key prefix = %q, want app:locks", redis.lockerOption.KeyPrefix)
 	}
-	if redis.lockerOption.KeyMajority != 1 {
-		t.Fatalf("New() locker key majority = %d, want 1", redis.lockerOption.KeyMajority)
+	if redis.lockerOption.KeyMajority != 2 {
+		t.Fatalf("New() locker key majority = %d, want 2", redis.lockerOption.KeyMajority)
 	}
 
 	redis.Close()

@@ -8,15 +8,20 @@
 
 - `Cache.GetWithTTL` 原子返回对象和 Redis key 的毫秒 TTL，不再返回客户端缓存 TTL。
 - `Array.LastItems` 跳过空槽，保留合法零值和 JSON null。
-- 修复命名空间首个 hash tag 为空 `{}` 时组合 key 跨 Slot 的问题；普通命名空间的键名保持不变。
+- 修复命名空间首个 hash tag 为空 `{}` 时组合 key 跨 Slot 的问题；普通命名空间的键名保持不变；这类特殊命名空间升级时需迁移已有数据。
 
 ### Changed
 
+- 同步学习版的分布式安全能力：锁默认 `KeyMajority` 从 1 调整为 2，校验租约配置；延迟队列调度、移除和清理同时维护处理中状态。
 - Go 最低版本升级到 1.26.0，更新直接及间接依赖。
 - `DeleteEach`/`ExistsEach` 按最多 512 个命令分块执行，减少中间结果分配，并在 context 取消后停止发送剩余分块。
 
 ### Added
 
+- `LockFenced`/`TryLockFenced`、`WithLock`/`WithFencedLock` 和 `ErrLockLost`，支持 fencing token 与锁丢失检测。
+- `Idempotency.Run` 自动续租、成功后重置完整去重 TTL，以及 `ErrIdempotencyLeaseLost`。
+- DelayQueue `Claim`/`Ack`/`Nack`/`Extend`、可见性超时与旧 token 防护；旧 `Poll` 保留至多一次语义。
+- 同步完整单元、模糊、集成测试和核心/Redis 8 示例；固定静态分析及漏洞检查工具版本。
 - 排行榜 `Page` 接口，单页最多 1000 项，校验偏移、页大小及下标溢出。
 - 缓存 TTL、数组空槽、组合 key、排行榜分页和批量操作边界的回归测试。
 

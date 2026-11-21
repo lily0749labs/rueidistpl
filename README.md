@@ -71,7 +71,7 @@ if err != nil {
 defer redisClient.Close()
 ```
 
-锁客户端按需创建：不调用 `Lock` 或 `TryLock` 就不会额外建立锁连接。单节点默认 `KeyMajority: 1`；多节点必须通过 `Config.LockerOption` 设置正确的多数派。`LockerOption.ClientOption` 由统一的 `Config.ClientOption` 覆盖，避免维护两份连接配置。
+锁客户端按需创建：不调用锁 API 就不会额外建立连接。默认 `KeyMajority: 2`，即需要取得 `2*2-1` 个锁 key 中的两个；明确只使用单 Redis 实例且接受故障转移互斥窗口时，可以显式配置 `KeyMajority: 1`。`KeyValidity` 默认 5 秒、`ExtendInterval` 默认 2.5 秒；创建客户端时会拒绝小于 1ms 或不早于租约到期的续期间隔。`LockerOption.ClientOption` 由统一的 `Config.ClientOption` 覆盖，避免维护两份连接配置。
 
 ## 常用调用
 
@@ -103,7 +103,7 @@ if batch.Err != nil {
 
 `ExpirationInfo` 已将 PTTL/HPTTL 的 `-1ms`、`-2ms` 分别解释为 `Persistent` 和 `Exists=false`。除通用 `Redis.Expiration` 外，`Value.Expiration` 和 Redis 7.4+ 的 `Hash.ExpirationField` 也返回相同结构；原有 `TTL`/`TTLField` 继续保留以兼容旧代码。
 
-`DeleteEach`、`ExistsEach` 会为每个 key 单独发送命令，输入可以位于不同 Redis Cluster Slot，返回明细顺序与输入一致。大批次按每组最多 512 个命令分块执行；某个 key 失败不影响后续 key，context 取消后不再发送后续分块，尚未执行的 key 会记录取消错误。批次级 `Err` 由失败项聚合而成，可使用 `errors.Is` 判断根因；原有 `Delete`/`Exists` 仍可使用，并在失败时返回已经确认的部分计数。
+`DeleteEach`、`ExistsEach` 会为每个 key 单独发送命令，输入可以位于不同 Redis Cluster Slot，返回明细顺序与输入一致。每次最多发送 512 条命令，context 取消后停止发送后续分块；批次级 `Err` 由失败项聚合而成，可使用 `errors.Is` 判断根因；原有 `Delete`/`Exists` 仍可使用，并在失败时返回已经确认的部分计数。
 
 ### TTL 对象缓存
 
@@ -325,6 +325,8 @@ err = orders.SetGroupID(ctx, "billing", "0-0") // 重放时调整投递位置
 
 `AddMaxLen` 和 `TrimMaxLen` 使用 `MAXLEN ~` 近似裁剪，换取比精确裁剪更稳定的写入性能，实际长度可能暂时略超过阈值。每条消息统一存放在名为 `data` 的 JSON field 中；需要多字段原始消息时直接使用 Rueidis。
 
+消费组提供至少一次而不是恰好一次交付。每个并发 worker 必须使用唯一 consumer name，在业务副作用成功后再 `Ack`，并通过业务唯一约束处理“副作用成功、ACK 前宕机”产生的重复。还应定期处理 Pending、限制重试次数并把毒消息送入死信队列。
+
 ### Pub/Sub
 
 ```go
@@ -339,7 +341,7 @@ go func() {
 _, err := notifications.Publish(ctx, "created", notification)
 ```
 
-`Subscribe` 会阻塞到 context 取消、连接失败或 handler 返回错误；另有 `SubscribePattern`、`SubscribeShard` 和 `PublishShard`。Pub/Sub 不持久化消息，需要消费确认与重试时使用 Stream。
+`Subscribe` 会阻塞到 context 取消、连接失败或 handler 返回错误；另有 `SubscribePattern`、`SubscribeShard` 和 `PublishShard`。Pub/Sub 是可能丢消息的至多一次通知机制；订单、任务等需要确认与重放的数据必须使用 Stream 或专用消息队列。
 
 ### 幂等与轻量延迟任务
 
@@ -351,30 +353,45 @@ first, err := redisClient.Idempotency("payments").Run(
 
 queue := rueidistpl.NewDelayQueue[Job](redisClient, "email-jobs")
 err = queue.Schedule(ctx, job.ID, time.Now().Add(5*time.Minute), job)
-dueJobs, err := queue.Poll(ctx, time.Now(), 100)
+jobs, err := queue.Claim(ctx, 30*time.Second, 100)
+for _, job := range jobs {
+    if err := sendEmail(ctx, job.Value); err != nil {
+        _, _ = queue.Nack(ctx, job.ID, job.Token, time.Now().Add(time.Minute))
+        continue
+    }
+    acked, err := queue.Ack(ctx, job.ID, job.Token)
+    if err != nil || !acked {
+        // ACK 结果不确定或租约已经失效，按业务 ID 核对副作用。
+    }
+}
 ```
 
-`Idempotency.Run` 为每次执行写入随机所有权令牌；业务函数失败时只在令牌仍属于本次执行的情况下删除标记。即使 TTL 已到期且另一个请求重新取得执行权，旧请求也不会误删新标记。
+`Idempotency.Run` 为每次执行写入随机所有权令牌，按 TTL 的三分之一自动续租，并把续租失败通过业务 context 和 `ErrIdempotencyLeaseLost` 暴露出来；成功后重新设置完整 TTL，失败时只删除仍属于本次执行的标记。它避免同一时刻的重复执行，但不能替代数据库唯一约束、事务 outbox 或下游幂等接口。
 
-`DelayQueue.Poll` 会原子取出并删除到期任务，语义是至多一次，而且该破坏性 Lua 不启用客户端自动重试。单次 `limit` 不得超过 `MaxDelayQueuePollBatch`（1000），调用方应循环分批拉取。由于任务在返回前已删除，即使 JSON 解码失败也不会重新入队；要求 ACK、失败重试、死信或持久 worker 时，优先采用成熟任务队列，或使用本包的 Stream 封装。
+`DelayQueue.Claim` 使用 Redis 服务端时间领取任务，并通过 visibility timeout 自动恢复崩溃 worker 的任务。每次领取都有独立 token，旧 worker 不能 ACK、NACK 或续租后来重新投递的任务；长任务应在租约到期前调用 `Extend`。`Schedule` 同一 ID 会覆盖旧载荷并使旧 token 失效。单次 `limit` 不得超过 `MaxDelayQueuePollBatch`（1000）。
+
+旧的 `DelayQueue.Poll` 仍保留至多一次语义：它会在返回前删除任务，进程崩溃或响应丢失会永久丢任务，只能用于允许丢失的轻量通知。需要重试次数、死信、生产者结果核对等完整能力时优先使用 Stream 或专用任务队列。
 
 ### 分布式锁
 
 ```go
-lockCtx, unlock, err := redisClient.TryLock(ctx, "refresh-ranking")
-if err != nil {
-    return err
-}
-defer unlock()
-
-select {
-case <-lockCtx.Done():
-    return lockCtx.Err() // 续期失败，停止受保护任务
-default:
-}
+err := redisClient.WithFencedLock(ctx, "settle-order", func(lockCtx context.Context, token int64) error {
+    // 下游表保存最大 token，并通过 WHERE fencing_token < token 拒绝旧持有者。
+    return settleOrder(lockCtx, orderID, token)
+})
 ```
 
-需要等待锁时使用 `redisClient.Lock`；只尝试一次时使用 `TryLock`。锁被占用时，`TryLock` 返回 `rueidislock.ErrNotLocked`。
+普通非关键任务可以使用 `WithLock`；需要手动管理生命周期时使用 `Lock`/`TryLock`，并始终监听它们返回的 `lockCtx`。`WithLock` 和 `WithFencedLock` 会在 handler 返回后再次检查租约，非调用方取消导致的锁丢失返回 `ErrLockLost`。`LockFenced`/`TryLockFenced` 提供手动版本。
+
+fencing 计数器不会过期，不能删除；下游资源必须原子拒绝旧 token，仅生成 token 而不校验没有保护作用。Redis 异步复制故障转移仍可能丢失最新计数值，因此资金、库存等严格一致资源最好使用其主数据库生成并校验 fencing token。所有 handler 都必须响应收到的 context，库无法强制停止忽略取消的外部调用。
+
+### 分布式部署检查清单
+
+- 所有同一环境实例使用完全相同的 `KeyPrefix`，不同环境和租户使用不同前缀；不要留空后共享同一 Redis。
+- 锁、幂等和关键状态读取走主节点；把读命令发送到副本会失去读后写一致性。
+- 每次调用设置 context deadline，节点统一 NTP 时间；绝对时间调度仍由调用方时间决定。
+- Stream handler、DelayQueue handler 和外部接口按稳定业务 ID 幂等；Redis 与数据库之间没有自动分布式事务。
+- 在目标部署上测试主从切换、网络分区、续租失败、worker 宕机和 Pending 恢复，不只测试健康拓扑。
 
 ## 原生命令出口
 
@@ -438,3 +455,7 @@ RUEIDISTPL_REDIS_SOCKET=/path/to/redis.sock go test -race -cover ./...
 ```
 
 集成测试会在独立 key 前缀下写入测试数据，并在结束时清理这些 key。
+
+`examples/` 和 `examples/redis8/` 分别演示核心能力与 Redis 8 高版本结构，可用 `go run ./examples` 和 `go run ./examples/redis8` 运行。核心 TCP 集成测试使用 `RUEIDISTPL_INTEGRATION=1`，原生 Array 测试使用 `RUEIDISTPL_ARRAY_INTEGRATION=1`，连接地址及认证通过 `REDIS_ADDR` 和 `REDIS_PASSWORD` 配置。
+
+检查工具由 `go.mod` 的 `tool` 指令固定，可执行 `go tool staticcheck ./...` 与 `go tool govulncheck ./...`。Go 1.26.0 用于最低版本兼容测试；漏洞扫描应使用当前安全补丁工具链。
