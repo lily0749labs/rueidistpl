@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/redis/rueidis"
@@ -15,6 +16,12 @@ var ErrRankingValueMissing = errors.New("rueidistpl: ranking member has no objec
 
 // ErrRankingScoreMissing 表示 Hash 中存在排行榜对象，但对应 ZSet 分数已经缺失。
 var ErrRankingScoreMissing = errors.New("rueidistpl: ranking object has no score")
+
+// MaxRankingPageSize 限制 Page 单次读取的条目数，避免一次 Lua 处理过大的排行榜。
+const MaxRankingPageSize int64 = 1000
+
+// ErrInvalidRankingPage 表示分页偏移为负数、页大小不在 [1, MaxRankingPageSize] 内或下标溢出。
+var ErrInvalidRankingPage = errors.New("rueidistpl: invalid ranking page")
 
 var rankingUpsertScript = rueidis.NewLuaScriptRetryable(`
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
@@ -141,7 +148,17 @@ func (ranking *Ranking[T]) Top(ctx context.Context, limit int64) ([]Ranked[T], e
 	return ranking.Range(ctx, 0, limit-1)
 }
 
-// Range 按分数降序返回零基排名闭区间内的对象。
+// Page 从零基 offset 开始按分数降序读取 limit 项；每页最多 MaxRankingPageSize 项。
+// 每页内部是同一时刻的快照；并发更新时不同页之间可能出现重复或遗漏。
+func (ranking *Ranking[T]) Page(ctx context.Context, offset, limit int64) ([]Ranked[T], error) {
+	if offset < 0 || limit <= 0 || limit > MaxRankingPageSize || offset > math.MaxInt64-(limit-1) {
+		return nil, ErrInvalidRankingPage
+	}
+	return ranking.Range(ctx, offset, offset+limit-1)
+}
+
+// Range 按分数降序返回零基排名闭区间内的对象，支持 Redis 的负下标。
+// 该兼容接口不限制返回条目数；大排行榜应使用 Page 控制单次 Lua 的工作量。
 func (ranking *Ranking[T]) Range(ctx context.Context, start, stop int64) ([]Ranked[T], error) {
 	values, err := rankingRangeScript.Exec(
 		ctx,

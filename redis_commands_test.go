@@ -159,8 +159,11 @@ func TestDeleteEachPreservesPartialResults(t *testing.T) {
 }
 
 func TestBooleanBatchResultsRejectsInvalidResponses(t *testing.T) {
-	results, count, err := booleanBatchResults("EXISTS", []string{"a", "b"}, []rueidis.RedisResult{
+	results := make([]error, 2)
+	count, err := booleanBatchResults("EXISTS", []string{"a", "b"}, []rueidis.RedisResult{
 		rueidismock.Result(rueidismock.RedisInt64(2)),
+	}, func(index int, value bool, err error) {
+		results[index] = err
 	})
 	if count != 0 {
 		t.Fatalf("booleanBatchResults() count = %d, want 0", count)
@@ -168,7 +171,7 @@ func TestBooleanBatchResultsRejectsInvalidResponses(t *testing.T) {
 	if !errors.Is(err, ErrInvalidBatchResponse) {
 		t.Fatalf("booleanBatchResults() error = %v, want ErrInvalidBatchResponse", err)
 	}
-	if len(results) != 2 || results[0].err == nil || results[1].err == nil {
+	if results[0] == nil || results[1] == nil {
 		t.Fatalf("booleanBatchResults() results = %#v, want invalid and missing errors", results)
 	}
 }

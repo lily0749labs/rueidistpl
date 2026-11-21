@@ -11,6 +11,9 @@ import (
 // ErrInvalidBatchResponse 表示 Rueidis 返回的批量结果数量或单 key 状态值不符合命令约定。
 var ErrInvalidBatchResponse = errors.New("rueidistpl: invalid batch response")
 
+// 限制每次 DoMulti 的命令数和临时内存；最终明细仍与全部输入一一对应。
+const keyBatchSize = 512
+
 // DeleteKeyResult 记录 DeleteEach 中一个逻辑 key 的执行结果。
 type DeleteKeyResult struct {
 	Key     string
@@ -41,59 +44,71 @@ type ExistsBatchResult struct {
 	Err      error
 }
 
-type booleanKeyResult struct {
-	key   string
-	value bool
-	err   error
-}
-
 // DeleteEach 逐 key 执行 DEL，返回与输入顺序一致的明细。
 // 每个 key 使用独立命令，因此可以安全处理 Redis Cluster 中跨 Slot 的输入。
+// 大批次会分块执行；某个 key 失败不会阻止后续 key，ctx 取消后不再发送后续分块。
 func (redis *Redis) DeleteEach(ctx context.Context, keys ...string) DeleteBatchResult {
-	commands := make([]rueidis.Completed, len(keys))
-	for index, key := range keys {
-		commands[index] = redis.client.B().Del().Key(redis.Key(key)).Build()
-	}
-	if len(commands) == 0 {
-		return DeleteBatchResult{Results: make([]DeleteKeyResult, 0)}
-	}
-
-	items, count, err := booleanBatchResults("DEL", keys, redis.client.DoMulti(ctx, commands...))
-	results := make([]DeleteKeyResult, len(items))
-	for index, item := range items {
-		results[index] = DeleteKeyResult{Key: item.key, Deleted: item.value, Err: item.err}
-	}
+	results := make([]DeleteKeyResult, len(keys))
+	count, err := redis.booleanKeyBatches(ctx, "DEL", keys, func(index int, value bool, err error) {
+		results[index] = DeleteKeyResult{Key: keys[index], Deleted: value, Err: err}
+	})
 	return DeleteBatchResult{Results: results, Deleted: count, Err: err}
 }
 
 // ExistsEach 逐 key 执行 EXISTS，返回与输入顺序一致的明细。
 // 每个 key 使用独立命令，因此可以安全处理 Redis Cluster 中跨 Slot 的输入。
+// 大批次会分块执行；某个 key 失败不会阻止后续 key，ctx 取消后不再发送后续分块。
 func (redis *Redis) ExistsEach(ctx context.Context, keys ...string) ExistsBatchResult {
-	commands := make([]rueidis.Completed, len(keys))
-	for index, key := range keys {
-		commands[index] = redis.client.B().Exists().Key(redis.Key(key)).Build()
-	}
-	if len(commands) == 0 {
-		return ExistsBatchResult{Results: make([]ExistsKeyResult, 0)}
-	}
-
-	items, count, err := booleanBatchResults("EXISTS", keys, redis.client.DoMulti(ctx, commands...))
-	results := make([]ExistsKeyResult, len(items))
-	for index, item := range items {
-		results[index] = ExistsKeyResult{Key: item.key, Exists: item.value, Err: item.err}
-	}
+	results := make([]ExistsKeyResult, len(keys))
+	count, err := redis.booleanKeyBatches(ctx, "EXISTS", keys, func(index int, value bool, err error) {
+		results[index] = ExistsKeyResult{Key: keys[index], Exists: value, Err: err}
+	})
 	return ExistsBatchResult{Results: results, Existing: count, Err: err}
 }
 
-func booleanBatchResults(operation string, keys []string, redisResults []rueidis.RedisResult) ([]booleanKeyResult, int64, error) {
-	results := make([]booleanKeyResult, len(keys))
-	errorsByKey := make([]error, 0)
+func (redis *Redis) booleanKeyBatches(ctx context.Context, operation string, keys []string, setResult func(int, bool, error)) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	commands := make([]rueidis.Completed, 0, min(len(keys), keyBatchSize))
+	var count int64
+	var batchErrors []error
+	for offset := 0; offset < len(keys); {
+		if err := ctx.Err(); err != nil {
+			for index := offset; index < len(keys); index++ {
+				setResult(index, false, fmt.Errorf("%s key %q: %w", operation, keys[index], err))
+			}
+			batchErrors = append(batchErrors, err)
+			break
+		}
+		end := offset + min(keyBatchSize, len(keys)-offset)
+		commands = commands[:0]
+		for _, key := range keys[offset:end] {
+			if operation == "DEL" {
+				commands = append(commands, redis.client.B().Del().Key(redis.Key(key)).Build())
+			} else {
+				commands = append(commands, redis.client.B().Exists().Key(redis.Key(key)).Build())
+			}
+		}
+		batchCount, err := booleanBatchResults(operation, keys[offset:end], redis.client.DoMulti(ctx, commands...), func(index int, value bool, err error) {
+			setResult(offset+index, value, err)
+		})
+		count += batchCount
+		if err != nil {
+			batchErrors = append(batchErrors, err)
+		}
+		offset = end
+	}
+	return count, errors.Join(batchErrors...)
+}
+
+func booleanBatchResults(operation string, keys []string, redisResults []rueidis.RedisResult, setResult func(int, bool, error)) (int64, error) {
+	var errorsByKey []error
 	var count int64
 	for index, key := range keys {
-		results[index].key = key
 		if index >= len(redisResults) {
 			itemErr := fmt.Errorf("%s key %q: %w: missing result", operation, key, ErrInvalidBatchResponse)
-			results[index].err = itemErr
+			setResult(index, false, itemErr)
 			errorsByKey = append(errorsByKey, itemErr)
 			continue
 		}
@@ -101,18 +116,18 @@ func booleanBatchResults(operation string, keys []string, redisResults []rueidis
 		value, err := redisResults[index].AsInt64()
 		if err != nil {
 			itemErr := fmt.Errorf("%s key %q: %w", operation, key, err)
-			results[index].err = itemErr
+			setResult(index, false, itemErr)
 			errorsByKey = append(errorsByKey, itemErr)
 			continue
 		}
 		if value != 0 && value != 1 {
 			itemErr := fmt.Errorf("%s key %q: %w: got %d, want 0 or 1", operation, key, ErrInvalidBatchResponse, value)
-			results[index].err = itemErr
+			setResult(index, false, itemErr)
 			errorsByKey = append(errorsByKey, itemErr)
 			continue
 		}
 
-		results[index].value = value == 1
+		setResult(index, value == 1, nil)
 		count += value
 	}
 	if len(redisResults) > len(keys) {
@@ -124,5 +139,5 @@ func booleanBatchResults(operation string, keys []string, redisResults []rueidis
 			len(keys),
 		))
 	}
-	return results, count, errors.Join(errorsByKey...)
+	return count, errors.Join(errorsByKey...)
 }

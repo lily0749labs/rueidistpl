@@ -251,6 +251,8 @@ func (array *Array[T]) Ring(ctx context.Context, size int64, values ...T) (int64
 
 // LastItems 返回最近插入的最多 count 个对象。
 // reverse=false 按从旧到新的插入顺序返回，reverse=true 按从新到旧返回；count 非正时返回空切片。
+// count 限制 Redis 检查的槽位数，空槽会被跳过，因此实际返回的对象数可能更少。
+// 需要保留空槽状态时使用 Range 或 GetMany。
 func (array *Array[T]) LastItems(ctx context.Context, count int64, reverse bool) ([]T, error) {
 	if count <= 0 {
 		return []T{}, nil
@@ -266,8 +268,11 @@ func (array *Array[T]) LastItems(ctx context.Context, count int64, reverse bool)
 	if err != nil {
 		return nil, err
 	}
-	values := make([]T, len(messages))
+	values := make([]T, 0, len(messages))
 	for position := range messages {
+		if messages[position].IsNil() {
+			continue
+		}
 		raw, err := messages[position].ToString()
 		if err != nil {
 			return nil, fmt.Errorf("decode array recent item %d: %w", position, err)
@@ -276,7 +281,7 @@ func (array *Array[T]) LastItems(ctx context.Context, count int64, reverse bool)
 		if err != nil {
 			return nil, fmt.Errorf("decode array recent item %d: %w", position, err)
 		}
-		values[position] = value
+		values = append(values, value)
 	}
 	return values, nil
 }

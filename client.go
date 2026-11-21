@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -217,6 +218,11 @@ func compositeKeyPrefix(redis *Redis, namespace string) string {
 	tag := base64.RawURLEncoding.EncodeToString([]byte(namespace))
 	if tag == "" {
 		tag = "default"
+	}
+	// Redis 遇到首个空 {} 后会对整个 key 哈希，不会继续使用后面的 tag。
+	// 仅为这类原先不能共用 slot 的命名空间前置 tag，保留其他既有键名。
+	if opening := strings.IndexByte(namespace, '{'); opening >= 0 && opening+1 < len(namespace) && namespace[opening+1] == '}' {
+		return "{" + tag + "}:" + namespace
 	}
 	return namespace + ":{" + tag + "}"
 }
