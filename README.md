@@ -8,7 +8,7 @@
 
 ## 安装
 
-要求 Go 1.25 或更高版本：
+要求 Go 1.26.0 或更高版本：
 
 ```bash
 go get github.com/lily0749labs/rueidistpl@v0.1.1
@@ -103,7 +103,7 @@ if batch.Err != nil {
 
 `ExpirationInfo` 已将 PTTL/HPTTL 的 `-1ms`、`-2ms` 分别解释为 `Persistent` 和 `Exists=false`。除通用 `Redis.Expiration` 外，`Value.Expiration` 和 Redis 7.4+ 的 `Hash.ExpirationField` 也返回相同结构；原有 `TTL`/`TTLField` 继续保留以兼容旧代码。
 
-`DeleteEach`、`ExistsEach` 会为每个 key 单独发送命令，输入可以位于不同 Redis Cluster Slot，返回明细顺序与输入一致。批次级 `Err` 由失败项聚合而成，可使用 `errors.Is` 判断根因；原有 `Delete`/`Exists` 仍可使用，并在失败时返回已经确认的部分计数。
+`DeleteEach`、`ExistsEach` 会为每个 key 单独发送命令，输入可以位于不同 Redis Cluster Slot，返回明细顺序与输入一致。大批次按每组最多 512 个命令分块执行；某个 key 失败不影响后续 key，context 取消后不再发送后续分块，尚未执行的 key 会记录取消错误。批次级 `Err` 由失败项聚合而成，可使用 `errors.Is` 判断根因；原有 `Delete`/`Exists` 仍可使用，并在失败时返回已经确认的部分计数。
 
 ### TTL 对象缓存
 
@@ -113,10 +113,13 @@ users := rueidistpl.NewCache[User](redisClient, "cache:user")
 err := users.Set(ctx, "1", user)                  // 使用默认 TTL
 err = users.Set(ctx, "2", user, 30*time.Minute) // 覆盖本次 TTL
 user, err = users.Get(ctx, "1")
+user, ttl, err := users.GetWithTTL(ctx, "1") // 同一快照中的对象与 Redis key TTL
 err = users.Delete(ctx, "1")
 ```
 
 `Prefix()` 可查看包含全局前缀的真实缓存命名空间。`rueidistpl.IsNotFound(err)` 同时识别 gocache 未命中和 Rueidis Redis Nil，可统一用于 Cache、Value、Hash、List、Ranking 等单值读取。
+
+`GetWithTTL` 通过一次 Lua 原子读取对象和 `PTTL`，绕过客户端缓存，返回毫秒精度的 Redis key 剩余时间；`-1ms` 表示不过期。该方法需要 `EVALSHA`/`EVAL` 权限。对象不存在时返回可由 `IsNotFound` 判断的错误，发生错误时对象和 TTL 都返回零值。
 
 Rueidis Store 的过期精度为秒；小于 1 秒的正 TTL 会自动提升为 1 秒。
 
@@ -152,10 +155,13 @@ ranking := rueidistpl.NewRanking[User](redisClient, "ranking")
 
 err := ranking.Upsert(ctx, "user-1", 100, user)
 top, err := ranking.Top(ctx, 10)
+page, err := ranking.Page(ctx, 20, 10) // offset=20，读取接下来的 10 项
 removed, err := ranking.Remove(ctx, "user-1")
 ```
 
 排行榜的 ZSet 只保存稳定 ID，对象保存在 Hash，因此更新对象不会产生重复成员。两个键自动使用相同的 Redis Cluster hash tag，`Upsert` 和 `Remove` 通过 Lua 原子更新，`Get` 和 `Range` 也在单次 Lua 中读取一致快照，避免并发更新时组合出跨时刻数据。`Upsert` 会在执行 Lua 前拒绝 `NaN` 分数，避免 HSET 成功后 ZADD 才失败。
+
+大排行榜优先使用 `Page(ctx, offset, limit)`：offset 从零开始，limit 必须在 `[1, MaxRankingPageSize]` 内，目前最多 1000 项。参数无效或排名下标溢出时返回 `ErrInvalidRankingPage`。各页内部是原子快照，但并发更新可能使不同页之间出现重复或遗漏。兼容接口 `Range` 保留负下标和全量读取能力，调用方应限制读取范围。
 
 ### 计数器、List、Set、ZSet
 
@@ -217,6 +223,8 @@ _, err = users.Ring(ctx, 1000, user3)
 ```
 
 `ArrayItem[T]` 同时返回 `Index`、`Exists` 和强类型 `Value`，因此合法的对象零值不会与 Redis Array 空槽混淆。`Len` 返回“最高使用下标 + 1”的逻辑长度，`Count` 返回非空槽数；另有 `LastItems`、`Delete`、`DeleteRanges` 和 `Clear`。`Scan` 同时兼容 Redis 8.10.0 RESP3 的嵌套 pair 响应和命令文档描述的扁平 pair 响应。
+
+`LastItems` 跳过 Redis 返回的空槽，合法的对象零值和 JSON `null` 仍会保留。count 限制 Redis 检查的槽位数，因此结果可能少于 count；需要保留空槽状态时使用 `Range` 或 `GetMany`。
 
 该封装保存的是 JSON 字符串，覆盖常用的强类型结构操作。按原始字符串执行的 `ARGREP`、数值/位聚合 `AROP` 和运维信息 `ARINFO` 不在泛型层重复抽象，可通过 `redisClient.Client().B()` 的 Rueidis 强类型 Builder 直接调用。Array 命令从 Redis 8.8.0 才提供；连接旧版本不会影响其他结构，但调用 Array 方法会返回 Redis 未知命令错误。
 
@@ -379,7 +387,7 @@ result := redisClient.Client().Do(ctx, redisClient.Client().B().Xlen().Key(key).
 
 ## 版本要求
 
-最低支持 Go 1.25。生产环境建议使用所选 Go 系列的最新安全补丁版本。
+最低支持 Go 1.26.0。生产环境建议使用所选 Go 系列的最新安全补丁版本。
 
 ### Redis 版本边界
 
@@ -408,8 +416,25 @@ result := redisClient.Client().Do(ctx, redisClient.Client().B().Xlen().Key(key).
 
 Cluster 中，`DeleteEach` 和 `ExistsEach` 会逐 key 路由，可以接收跨 Slot 输入。Ranking 和 DelayQueue 会自动让内部 key 共用 Slot。`Bitmap.Combine`、`HyperLogLog.CountWith`/`MergeFrom` 等 Redis 原生多 key 命令仍要求调用方在逻辑 key 中使用相同 `{hash-tag}`。
 
+组合结构保留普通命名空间原有的键名。如果包含全局前缀的命名空间首次出现的花括号是空 `{}`，生成的 hash tag 会前置，避免 Redis 忽略后面的 tag。此前在单机 Redis 中使用这类特殊命名空间的项目，升级时应根据 `Keys()` 返回的新键名迁移已有数据；其他命名空间不受影响。
+
 ### 升级建议
 
 - `v0.x` 阶段的补丁版本保持公开 API 兼容；次版本可能调整 API，并在更新日志中说明迁移方式。
 - 升级 rueidistpl 前阅读 [CHANGELOG.md](CHANGELOG.md)，重点关注返回值语义、最低 Redis 版本和 key 组织变化。
 - 升级 Redis 或变更 Cluster 部署前，应在目标版本和拓扑上验证高版本命令、节点公布地址、TLS/认证、跨 Slot 路由和 hash tag。
+
+## 测试
+
+```sh
+go test -race -cover ./...
+go vet ./...
+```
+
+集成测试默认跳过；使用带原生 Array 命令的 Redis 8.8+ 专用实例，通过 Unix socket 显式启用：
+
+```sh
+RUEIDISTPL_REDIS_SOCKET=/path/to/redis.sock go test -race -cover ./...
+```
+
+集成测试会在独立 key 前缀下写入测试数据，并在结束时清理这些 key。

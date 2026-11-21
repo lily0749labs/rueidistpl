@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `Cache.GetWithTTL` 原子返回对象和 Redis key 的毫秒 TTL，不再返回客户端缓存 TTL。
+- `Array.LastItems` 跳过空槽，保留合法零值和 JSON null。
+- 修复命名空间首个 hash tag 为空 `{}` 时组合 key 跨 Slot 的问题；普通命名空间的键名保持不变。
+
+### Changed
+
+- Go 最低版本升级到 1.26.0，更新直接及间接依赖。
+- `DeleteEach`/`ExistsEach` 按最多 512 个命令分块执行，减少中间结果分配，并在 context 取消后停止发送剩余分块。
+
+### Added
+
+- 排行榜 `Page` 接口，单页最多 1000 项，校验偏移、页大小及下标溢出。
+- 缓存 TTL、数组空槽、组合 key、排行榜分页和批量操作边界的回归测试。
+
 ## [0.1.1] - 2026-08-23
 
 ### Changed
